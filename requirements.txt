@@ -1,0 +1,7 @@
+flask
+flask-cors
+pymongo[srv]
+netmiko
+dnspython
+certifi
+flask-socketio
