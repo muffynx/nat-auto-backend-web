@@ -1,6 +1,7 @@
-
+import env
+from dotenv import load_dotenv
+load_dotenv()
 import eventlet
-
 eventlet.monkey_patch()
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -11,20 +12,32 @@ import datetime as dt  # ✅ ใช้ dt เพื่อป้องกัน E
 import certifi
 import concurrent.futures 
 import traceback 
-
+from flask import send_file # ✅ สำหรับส่งไฟล์ดาวน์โหลด
 from converter import ConfigConverter # ✅ Import Class ใหม่
-
+import io
 from flask_socketio import SocketIO, emit 
+
+from datetime import datetime, timezone
+
+from datetime import timezone, timedelta
+
+thai_tz = timezone(timedelta(hours=7))
+datetime.now(thai_tz)
 
 
 app = Flask(__name__)
 CORS(app) 
+import os
 
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+
+
+
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 # --- DATABASE CONFIG ---
 # ⚠️ อย่าลืมเช็ค Password ใน MONGO_URI อีกทีนะครับ
-MONGO_URI = "mongodb+srv://asoog9966_db_user:CJYU4nEYISFXKZ4C@cluster0.d9vzgqm.mongodb.net/?retryWrites=true&w=majority"
+MONGO_URI = env.get_env_variable('PYTHON_MONGODB_URI')
+
 
 users_col = None
 db = None
@@ -37,7 +50,7 @@ try:
 except Exception as e:
     print(f"❌ MongoDB Connection Error: {e}")
 
-
+# api to save logs
 
 
 @socketio.on('start_backup_realtime')
@@ -104,29 +117,87 @@ def handle_realtime_backup(data):
 
 
 
-# ✅ API สำหรับ Convert Config
+# ✅ API: Convert Config
 @app.route('/api/convert_config', methods=['POST'])
 def convert_config_api():
     current_user = request.headers.get('X-Username')
     if not current_user: return jsonify({'msg': 'Unauthorized'}), 401
 
-    data = request.json
-    source_type = data.get('source_type')
-    target_type = data.get('target_type')
-    log_content = data.get('log_content')
+    source_type = None
+    target_type = None
+    log_content = None
 
-    if not log_content:
-        return jsonify({'status': 'error', 'msg': 'Please provide log content'}), 400
+    # CASE 1: Excel Upload
+    if request.content_type and 'multipart/form-data' in request.content_type:
+        source_type = request.form.get('source_type')
+        target_type = request.form.get('target_type')
+        if 'file' not in request.files: return jsonify({'msg': 'No file'}), 400
+        log_content = request.files['file'].read() # bytes
+
+    # CASE 2: Text JSON
+    else:
+        data = request.json
+        source_type = data.get('source_type')
+        target_type = data.get('target_type')
+        log_content = data.get('log_content') # string
+
+    if not source_type or not target_type or not log_content:
+        return jsonify({'status': 'error', 'msg': 'Missing parameters'}), 400
 
     try:
-        # เริ่มกระบวนการแปลง
+        # ✅ เรียกใช้ Class (ตอนนี้ __init__ รับ 3 ค่าแล้ว ถูกต้อง)
         converter = ConfigConverter(source_type, target_type, log_content)
         result_config = converter.process()
-        
+
         return jsonify({'status': 'success', 'output': result_config})
+
     except Exception as e:
+        traceback.print_exc()
         return jsonify({'status': 'error', 'msg': str(e)}), 500
 
+
+# ✅ API: Export Excel (แก้เพิ่ม Route และ Clean Header)
+@app.route('/api/export_excel', methods=['POST'])
+def export_excel_api():
+    current_user = request.headers.get('X-Username')
+    
+    log_content = request.json.get('log_content')
+    source_type = request.json.get('source_type')
+    
+    if not log_content: return jsonify({'msg': 'No content'}), 400
+
+    try:
+        # 1. Init Converter
+        converter = ConfigConverter(source_type, "aruba_cx", log_content)
+        
+        # 2. ✅ Clean Header ก่อน Parse (สำคัญ! ไม่งั้น Parse ไม่เจอ)
+        if isinstance(converter.raw_log, str):
+            for header in ["display current-configuration", "show running-config"]:
+                if header in converter.raw_log:
+                    converter.raw_log = converter.raw_log.split(header, 1)[1]
+
+        # 3. Parse ตาม Source Type
+        if source_type == "hp_comware":
+            converter._parse_comware()
+        elif source_type == "cisco_ios":
+            converter._parse_cisco_ios()
+        
+        # 4. Export
+        excel_data = converter.export_to_excel()
+        
+        return send_file(
+            io.BytesIO(excel_data),
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name=f"network_spec_{converter.data['hostname']}.xlsx"
+        )
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'status': 'error', 'msg': str(e)}), 500
+
+
+
+# --- ADMIN USER MANAGEMENT API ---
 @app.route('/api/users', methods=['GET'])
 def get_users():
     if users_col is None: return jsonify([]), 500
@@ -734,4 +805,5 @@ def get_backups():
     return jsonify(logs)
 
 if __name__ == '__main__':
-    socketio.run(app, debug=True, port=5000)
+    socketio.run(app, host="0.0.0.0", port=5000, debug=True)
+    print(f"🚀 Flask Server running on http://192.168.74.1:5000")
