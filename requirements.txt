@@ -1,7 +1,12 @@
 flask
 flask-cors
+flask-socketio
 pymongo[srv]
 netmiko
 dnspython
 certifi
-flask-socketio
+pandas==2.2.2
+python-dotenv
+eventlet
+gunicorn
+xlsxwriter

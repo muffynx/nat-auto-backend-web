@@ -16,7 +16,7 @@ from flask import send_file # ✅ สำหรับส่งไฟล์ดา�
 from converter import ConfigConverter # ✅ Import Class ใหม่
 import io
 from flask_socketio import SocketIO, emit 
-
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 from datetime import timezone, timedelta
@@ -627,7 +627,9 @@ def task_send_command(device, command):
         return {'host': device['hostname'], 'status': 'Success', 'output': output}
     except Exception as e:
         return {'host': device['hostname'], 'status': 'Failed', 'error': str(e)}
-
+# ---------------------------------------------------------
+# 1. Worker Function: ฟังก์ชันสำหรับ Config อุปกรณ์ 1 ตัว
+# ---------------------------------------------------------
 def task_push_config(device, config_lines):
     try:
         driver = get_device_driver(device)
@@ -640,6 +642,59 @@ def task_push_config(device, config_lines):
     except Exception as e:
         return {'host': device['hostname'], 'status': 'Failed', 'error': str(e)}
     
+# ---------------------------------------------------------
+# 2. API Route: รับคำสั่ง Batch Config
+# ---------------------------------------------------------
+
+@app.route('/api/batch_config', methods=['POST'])
+def api_batch_config():
+    data = request.json
+    
+    # รับข้อมูลจาก Frontend
+    target_devices = data.get('devices', []) # List ของอุปกรณ์ที่ติ๊กเลือกมา
+    config_commands = data.get('commands', []) # List ของคำสั่ง (เช่น ['vlan 10', 'name SALES'])
+    
+    if not target_devices or not config_commands:
+        return jsonify({"error": "Missing devices or commands"}), 400
+
+    results = []
+    
+    # 🔥 เริ่มทำงานแบบ ThreadPool (Parallel)
+    # max_workers=10 คือทำพร้อมกันสูงสุด 10 ตัว (ปรับได้ตามความแรงเครื่อง Server)
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        # สร้าง List ของงาน (Future objects)
+        future_to_device = {
+            executor.submit(task_push_config, device, config_commands): device 
+            for device in target_devices
+        }
+        
+        # รอรับผลลัพธ์เมื่องานเสร็จ (as_completed)
+        for future in as_completed(future_to_device):
+            device = future_to_device[future]
+            try:
+                data = future.result()
+                results.append(data)
+            except Exception as exc:
+                # กันเหนียวเผื่อ Worker ตาย
+                results.append({
+                    "host": device.get('host'),
+                    "status": "failed",
+                    "log": f"Worker Exception: {exc}"
+                })
+
+    # ส่งผลลัพธ์กลับไปให้ Frontend แสดงผล
+    return jsonify({
+        "summary": {
+            "total": len(target_devices),
+            "success": len([r for r in results if r['status'] == 'success']),
+            "failed": len([r for r in results if r['status'] == 'failed'])
+        },
+        "details": results
+    })
+
+
+
+
 
 def get_backup_command(device_type):
     # แปลงเป็นตัวพิมพ์เล็กกันพลาด
@@ -806,4 +861,3 @@ def get_backups():
 
 if __name__ == '__main__':
     socketio.run(app, host="0.0.0.0", port=5000, debug=True)
-    print(f"🚀 Flask Server running on http://192.168.74.1:5000")
